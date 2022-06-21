@@ -1,0 +1,13 @@
+[Unit]
+Description = Lecha Albums Telegram Bot
+After = network.target
+
+[Service]
+WorkingDirectory = /home/tikhon/lecha-albums-bot/
+
+User = tikhon
+ExecStart = /home/tikhon/lecha-albums-bot/env/bin/python lecha_albums_bot.py
+Restart = on-failure
+
+[Install]
+WantedBy = multi-user.target
