@@ -6,15 +6,26 @@ Bot for storing music albums and releases to the queue
 import json
 import logging
 import os
+import re
 from io import BytesIO
 from pathlib import Path
 
 import requests
+import sentry_sdk
 import validators
 from PIL import Image
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ParseMode
 from telegram.ext import CallbackContext, CommandHandler, Updater, MessageHandler, Filters, ConversationHandler, \
     CallbackQueryHandler
+
+sentry_sdk.init(
+    dsn="https://4ea25229795440e9a00cdbf9c85c8b26@o1075119.ingest.sentry.io/6522550",
+
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for performance monitoring.
+    # We recommend adjusting this value in production.
+    traces_sample_rate=1.0
+)
 
 TOKEN = os.environ.get('LECHA_ALBUMS_BOT_TOKEN')
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,11 +38,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_song_links(url: str) -> tuple:
-    data = requests.get("https://api.song.link/v1-alpha.1/links", params={
+    """Get song data from odesli from music service url"""
+    logger.info(f"Loading data from `{url}'.")
+    answer = requests.get("https://api.song.link/v1-alpha.1/links", params={
         'url': url,
         'userCountry': 'RU'
-    }).json()
-
+    })
+    if not answer.ok:
+        logger.error(f"Error with request to odesli ({answer.status_code}).")
+        return None, None
+    data = answer.json()
     url = data['pageUrl']
     song_data = None
     for k in data['entitiesByUniqueId']:
@@ -43,7 +59,7 @@ def get_song_links(url: str) -> tuple:
 
 def get_data(filename: str) -> dict:
     """Reads data from json file and returns dict"""
-
+    logger.info(f"Loading data from file `{filename}`...")
     try:
         with open(filename) as f:
             return json.load(f)
@@ -54,37 +70,14 @@ def get_data(filename: str) -> dict:
 
 def store_data(data: dict, filename: str):
     """Stores python object serialized to json data to file"""
-
+    logger.info(f"Store data to file `{filename}`...")
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w') as f:
         json.dump(data, f)
 
 
-def start(update: Update, _: CallbackContext) -> None:
-    """Send a message when the command /start is issued."""
-
-    user = update.effective_user
-    if str(user.id) not in DATA:
-        DATA[str(user.id)] = []
-        store_data(DATA, CONFIG_FILENAME)
-    logger.info("User %s connected.", user.first_name)
-    update.message.reply_text(f'Привет {user.full_name}! Чтобы создать новую запись нажми /new')
-
-
-def help_command(update: Update, _: CallbackContext) -> None:
-    """Send a message when the command /help is issued."""
-
-    update.message.reply_text('Чтобы создать новую запись нажми /new')
-
-
-def new_object(update: Update, _: CallbackContext) -> None:
-    """Init create album description script"""
-
-    update.message.reply_text('Отправьте ссылку на релиз.')
-    return LINK
-
-
 def generate_text(data: dict) -> str:
+    """Generate album data"""
     return f"""<b>#{data['tag']}</b>
 <b>Artist:</b> {data['data']['artistName']}
 <b>Album:</b> {data['data']['title']}
@@ -94,61 +87,17 @@ def generate_text(data: dict) -> str:
 <b>Link:</b> {data.get('url')}
 
 <i>#{data['data']['artistName'].replace(" ", "")} #{data.get('year', '')[:3] + '0s'} #{data.get('country')} {" ".join(
-        ['#' + i.replace(" ", "").replace("-", "") for i in data.get('genres')]
+        ['#' + re.sub('[^A-Za-z0-9]+', '', i) for i in data.get('genres')]
     )}</i>
     """
 
 
-def get_link(update: Update, context: CallbackContext) -> None:
-    """get link and load all data from odesli"""
-
-    user = update.effective_user
-    if not validators.url(update.message.text):
-        update.message.reply_text('Ты дебил?! Это не ссылка, давай еще раз.')
-        return LINK
-
-    url, data = get_song_links(update.message.text)
-    tag = len(DATA[str(user.id)])
-    context.user_data["tag"] = tag
-
-    DATA[str(user.id)].append({
-        "url": url,
-        "data": data,
-        "tag": tag,
-    })
-    store_data(DATA, CONFIG_FILENAME)
-    update.message.reply_text('Отправьте жанры через запятую.')
-    return GENRES
-
-
-def get_genres(update: Update, context: CallbackContext) -> None:
-    """get and process genres"""
-
-    user = update.effective_user
-    genres = update.message.text.split(', ')
-    tag = context.user_data["tag"]
-    DATA[str(user.id)][tag]['genres'] = genres
-    store_data(DATA, CONFIG_FILENAME)
-    update.message.reply_text('Отправьте год.')
-    return YEAR
-
-
-def get_year(update: Update, context: CallbackContext) -> None:
-    """get and process year"""
-
-    user = update.effective_user
-    year = update.message.text
-    tag = context.user_data["tag"]
-    DATA[str(user.id)][tag]['year'] = year
-    store_data(DATA, CONFIG_FILENAME)
-    update.message.reply_text('Отправьте страну.')
-    return COUNTRY
-
-
 def generate_message_with_object(update: Update, data: dict) -> None:
+    """Send message with audio object"""
+    logger.info(f"Generating text with album for user {update.effective_user.full_name}")
     keyboard = [
         [
-            InlineKeyboardButton("✏ редактировать️", callback_data="open_edit"),
+            InlineKeyboardButton("\uFE0F редактировать️", callback_data="open_edit"),
             InlineKeyboardButton("❌ отменить", callback_data="cancel"),
         ],
         [InlineKeyboardButton("✅ подтвердить", callback_data="done")],
@@ -171,21 +120,92 @@ def generate_message_with_object(update: Update, data: dict) -> None:
     )
 
 
-def get_country(update: Update, context: CallbackContext) -> None:
-    """get and process country"""
+def start(update: Update, _: CallbackContext) -> None:
+    """Send a message when the command /start is issued."""
+    user = update.effective_user
+    if str(user.id) not in DATA:
+        DATA[str(user.id)] = []
+        store_data(DATA, CONFIG_FILENAME)
+    logger.info("User %s connected.", user.first_name)
+    update.message.reply_text(f'Привет {user.full_name}! Чтобы создать новую запись нажми /new')
 
+
+def help_command(update: Update, _: CallbackContext) -> None:
+    """Send a message when the command /help is issued."""
+    logger.info(f"User {update.effective_user.full_name} called /help command")
+    update.message.reply_text('Чтобы создать новую запись нажми /new')
+
+
+def new_object(update: Update, _: CallbackContext) -> int:
+    """Init create album description script"""
+    logger.info(f"User {update.effective_user.full_name} called /new command")
+    update.message.reply_text('Введите ссылку:')
+    return LINK
+
+
+def get_link(update: Update, context: CallbackContext) -> int:
+    """get link and load all data from odesli"""
+    logger.info(f"Getting link from {update.effective_user.full_name} input")
+    user = update.effective_user
+    if not validators.url(update.message.text):
+        logger.warning("Link invalid")
+        update.message.reply_text('Ты дебил?! Это не ссылка, давай еще раз.')
+        return LINK
+
+    url, data = get_song_links(update.message.text)
+    tag = len(DATA[str(user.id)])
+    context.user_data["tag"] = tag
+
+    DATA[str(user.id)].append({
+        "url": url,
+        "data": data,
+        "tag": tag,
+    })
+    store_data(DATA, CONFIG_FILENAME)
+    update.message.reply_text('Отправьте жанры через запятую.')
+    return GENRES
+
+
+def get_genres(update: Update, context: CallbackContext) -> int:
+    """Get and process genres"""
+    logger.info(f"Get genres from {update.effective_user.full_name}")
+    user = update.effective_user
+    genres = update.message.text.split(', ')
+    tag = context.user_data["tag"]
+    DATA[str(user.id)][tag]['genres'] = genres
+    store_data(DATA, CONFIG_FILENAME)
+    update.message.reply_text('Отправьте год.')
+    return YEAR
+
+
+def get_year(update: Update, context: CallbackContext) -> int:
+    """get and process year"""
+    logger.info(f"Get year from user {update.effective_user.full_name}")
+    user = update.effective_user
+    year = update.message.text
+    if not year.isdigit():
+        update.message.reply_text("Ты совсем дегенерат?! Это даже не число... Давай еще раз.")
+        return YEAR
+    tag = context.user_data["tag"]
+    DATA[str(user.id)][tag]['year'] = year
+    store_data(DATA, CONFIG_FILENAME)
+    update.message.reply_text('Отправьте страну.')
+    return COUNTRY
+
+
+def get_country(update: Update, context: CallbackContext) -> int:
+    """get and process country"""
+    logger.info(f"Process country and send album message to user {update.effective_user.full_name}")
     user = update.effective_user
     country = update.message.text
     tag = context.user_data["tag"]
     DATA[str(user.id)][tag]['country'] = country
     store_data(DATA, CONFIG_FILENAME)
-
     generate_message_with_object(update, DATA[str(user.id)][tag])
-
     return ConversationHandler.END
 
 
-def process_edits(update: Update, context: CallbackContext) -> None:
+def process_edits(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     if query.data == 'edit_tag':
         context.user_data["edit_state"] = 'edit_tag'
@@ -208,10 +228,10 @@ def process_edits(update: Update, context: CallbackContext) -> None:
     return CAPTURE_EDITS
 
 
-def capture_edits(update: Update, context: CallbackContext) -> None:
+def capture_edits(update: Update, context: CallbackContext) -> int:
     user = update.effective_user
     tag = context.user_data["tag"]
-
+    logger.info(f"Saving user edit {user.full_name}")
     if context.user_data["edit_state"] == 'edit_tag':
         DATA[str(user.id)][tag]['tag'] = update.message.text
     elif context.user_data["edit_state"] == 'edit_title':
@@ -239,12 +259,12 @@ def button(update: Update, _: CallbackContext) -> None:
 
     if query.data == 'open_edit':
         keyboard = [
-            [InlineKeyboardButton("✏ тег", callback_data="edit_tag"), ],
-            [InlineKeyboardButton("✏ название", callback_data="edit_title"), ],
-            [InlineKeyboardButton("✏ группа", callback_data="edit_band"), ],
-            [InlineKeyboardButton("✏ год", callback_data="edit_year"), ],
-            [InlineKeyboardButton("✏ страна", callback_data="edit_county"), ],
-            [InlineKeyboardButton("✏ жанры", callback_data="edit_genres"), ],
+            [InlineKeyboardButton("\uFE0F тег", callback_data="edit_tag"), ],
+            [InlineKeyboardButton("\uFE0F название", callback_data="edit_title"), ],
+            [InlineKeyboardButton("\uFE0F группа", callback_data="edit_band"), ],
+            [InlineKeyboardButton("\uFE0F год", callback_data="edit_year"), ],
+            [InlineKeyboardButton("\uFE0F страна", callback_data="edit_county"), ],
+            [InlineKeyboardButton("\uFE0F жанры", callback_data="edit_genres"), ],
             [InlineKeyboardButton("⬅️ назад", callback_data="back")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -256,7 +276,7 @@ def button(update: Update, _: CallbackContext) -> None:
     elif query.data == 'back':
         keyboard = [
             [
-                InlineKeyboardButton("✏ редактировать️", callback_data="open_edit"),
+                InlineKeyboardButton("\uFE0F редактировать️", callback_data="open_edit"),
                 InlineKeyboardButton("❌ отменить", callback_data="cancel"),
             ],
             [InlineKeyboardButton("✅ подтвердить", callback_data="done")],
@@ -267,12 +287,13 @@ def button(update: Update, _: CallbackContext) -> None:
 
 def cancel(update: Update, _: CallbackContext) -> None:
     """cancel conversation"""
+    logger.info(f"Canceling operation from user {update.effective_user.full_name}")
     update.message.reply_text("Отменено")
 
 
 def main() -> None:
     """Start the bot."""
-
+    logger.info("Loading bot...")
     global DATA
 
     if TOKEN is None:
@@ -301,9 +322,7 @@ def main() -> None:
 
     edit_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(process_edits, pattern='^edit.*$')],
-        states={
-            CAPTURE_EDITS: [MessageHandler(Filters.text, capture_edits)]
-        },
+        states={CAPTURE_EDITS: [MessageHandler(Filters.text, capture_edits)]},
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     dispatcher.add_handler(edit_conv_handler)
