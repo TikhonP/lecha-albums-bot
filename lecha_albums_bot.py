@@ -51,7 +51,7 @@ def get_song_links(url: str) -> tuple:
     url = data['pageUrl']
     song_data = None
     for k in data['entitiesByUniqueId']:
-        if k.split(':')[0].split('_')[0] == 'YANDEX':
+        if k.split(':')[0].split('_')[0] == 'ITUNES_ALBUM':
             song_data = data['entitiesByUniqueId'][k]
             break
     return url, song_data
@@ -153,6 +153,11 @@ def get_link(update: Update, context: CallbackContext) -> int:
         return LINK
 
     url, data = get_song_links(update.message.text)
+    if data is None:
+        logger.warning("Link invalid")
+        update.message.reply_text('Ты дебил?! Это ссылка не из Apple Music, давай еще раз.')
+        return LINK
+    logger.info(f"Got data from odesli for {update.effective_user.full_name}")
     tag = len(DATA[str(user.id)])
     context.user_data["tag"] = tag
 
