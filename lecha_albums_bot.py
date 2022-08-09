@@ -153,6 +153,15 @@ def get_link(update: Update, context: CallbackContext) -> int:
         return LINK
 
     url, data = get_song_links(update.message.text)
+    if url is None and data is None:
+        logger.warning("Link invalid")
+        update.message.reply_text('Не найдена ссылка в odesli.')
+        url = update.message.text
+        data = {
+            'title': 'Обновите название',
+            'artistName': 'Обновите исполнителя',
+            'thumbnailUrl': 'https://www.generationsforpeace.org/wp-content/uploads/2018/03/empty.jpg',
+        }
     if data is None:
         logger.warning("Link invalid")
         update.message.reply_text('Ты дебил?! Это ссылка не из Apple Music, давай еще раз.')
@@ -334,8 +343,11 @@ def main() -> None:
 
     dispatcher.add_handler(CallbackQueryHandler(button))
 
-    updater.start_polling()
-    updater.idle()
+    try:
+        updater.start_polling()
+        updater.idle()
+    except NetworkError:
+        exit(1)
 
 
 if __name__ == '__main__':
