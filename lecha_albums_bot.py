@@ -50,8 +50,8 @@ def get_song_links(url: str) -> tuple:
     data = answer.json()
     url = data['pageUrl']
     song_data = None
-    for k in data['entitiesByUniqueId']:
-        if k.split(':')[0].split('_')[0] == 'ITUNES_ALBUM':
+    for k in data['entitiesByUniqueId'].keys():
+        if k.split(':')[0].split('_')[0] == 'ITUNES':
             song_data = data['entitiesByUniqueId'][k]
             break
     return url, song_data
